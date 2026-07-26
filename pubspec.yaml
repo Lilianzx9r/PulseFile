@@ -1,0 +1,43 @@
+name: pulsefile
+description: PulseFile — Gestionnaire de fichiers universel (local, FTP, HTTP/PHP)
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # CLI (scripting cmd/PowerShell sous Windows)
+  args: ^2.5.0
+  # Storage
+  sqflite: ^2.3.3
+  sqflite_common_ffi: ^2.3.3
+  sqlite3_flutter_libs: ^0.5.0
+  path: ^1.9.0
+  path_provider: ^2.1.2
+  # Secure storage (mots de passe FTP/HTTP)
+  flutter_secure_storage: ^9.2.4
+  # FTP
+  ftpconnect: ^2.0.10
+  # HTTP
+  http: ^1.2.0
+  crypto: ^3.0.3
+  # UI
+  gap: ^3.0.1
+  file_picker: ^8.0.0
+  # Archives (compresser/extraire)
+  archive: ^3.6.1
+  # Glisser-déposer (Windows/macOS/Linux)
+  desktop_drop: ^0.4.4
+  # Thème
+  google_fonts: ^6.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
