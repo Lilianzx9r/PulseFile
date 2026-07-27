@@ -10,14 +10,17 @@ class TransferProgressController {
   final ValueNotifier<double?> progress = ValueNotifier<double?>(null); // null = indéterminé
   final ValueNotifier<String> label = ValueNotifier<String>('');
   bool _closed = false;
+  bool _disposed = false;
 
   void update(double? percent, {String? label}) {
-    if (_closed) return;
+    if (_closed || _disposed) return;
     progress.value = percent == null ? null : percent.clamp(0, 1);
     if (label != null) this.label.value = label;
   }
 
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
     _closed = true;
     progress.dispose();
     label.dispose();
@@ -64,9 +67,16 @@ TransferProgressController showTransferProgressDialog(
   return controller;
 }
 
-void closeTransferProgressDialog(BuildContext context, TransferProgressController controller) {
+Future<void> await closeTransferProgressDialog(
+    BuildContext context, TransferProgressController controller) async {
+  final navigator = Navigator.of(context, rootNavigator: true);
+  if (navigator.canPop()) {
+    navigator.pop();
+    // Let the dialog route unmount before disposing the ValueNotifiers that
+    // its ValueListenableBuilders are listening to.
+    await Future<void>.delayed(Duration.zero);
+  }
   controller.dispose();
-  Navigator.of(context, rootNavigator: true).pop();
 }
 
 /// Convertit un couple (transféré, total) en pourcentage 0..1, ou null si la

@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:gap/gap.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'transfer_destination_screen.dart';
 import '../services/ftp_service.dart';
 import '../services/http_service.dart';
 import '../services/cross_connection_transfer_service.dart';
@@ -672,8 +673,8 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
                 final e = _displayEntries[i];
                 final isSel = _selected.contains(e.path);
                 return Material(color: isSel ? accent.withOpacity(0.10) : cardBg, child: InkWell(
-                  onTap: () {
-                    if (_selecting) { _toggleSelect(e); return; }
+                  onTap: () => _toggleSelect(e),
+                  onDoubleTap: () {
                     if (e.isDir) { _lastOpenedSubDir = e.path; _load(e.path); }
                     else _downloadOrView(context, e);
                   },
@@ -800,8 +801,8 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
       Color border, Color textCol, Color subCol) {
     final isSel = _selected.contains(e.path);
     return GestureDetector(
-      onTap: () {
-        if (_selecting) { _toggleSelect(e); return; }
+      onTap: () => _toggleSelect(e),
+      onDoubleTap: () {
         if (e.isDir) { _lastOpenedSubDir = e.path; _load(e.path); }
         else _downloadOrView(context, e);
       },
@@ -845,12 +846,15 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
 
   List<PopupMenuEntry<String>> _menuItems(FtpEntry e) => [
         if (!e.isDir) ...[
-          const PopupMenuItem(value: 'open',
-              child: ListTile(dense: true, leading: Icon(Icons.open_in_new),
-                  title: Text('Ouvrir'))),
           const PopupMenuItem(value: 'download',
               child: ListTile(dense: true, leading: Icon(Icons.download_outlined),
                   title: Text('Télécharger vers…'))),
+          const PopupMenuItem(value: 'copy_to',
+              child: ListTile(dense: true, leading: Icon(Icons.copy_outlined),
+                  title: Text('Copier vers…'))),
+          const PopupMenuItem(value: 'compress',
+              child: ListTile(dense: true, leading: Icon(Icons.folder_zip_outlined),
+                  title: Text('Compresser vers…'))),
           const PopupMenuItem(value: 'edit',
               child: ListTile(dense: true, leading: Icon(Icons.edit_outlined),
                   title: Text('Éditer'))),
@@ -859,6 +863,10 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
                 child: ListTile(dense: true, leading: Icon(Icons.unarchive_outlined),
                     title: Text('Extraire'))),
         ],
+        if (e.isDir)
+          const PopupMenuItem(value: 'compress',
+              child: ListTile(dense: true, leading: Icon(Icons.folder_zip_outlined),
+                  title: Text('Compresser vers…'))),
         const PopupMenuItem(value: 'rename',
             child: ListTile(dense: true, leading: Icon(Icons.drive_file_rename_outline),
                 title: Text('Renommer'))),
@@ -886,12 +894,59 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
     if (v == 'move')       _move(context, e);
     if (v == 'properties') _showProperties(context, e);
     if (v == 'delete')     _delete(context, e);
-    if (v == 'download')   _downloadFile(context, e);
+    if (v == 'download' || v == 'copy_to') _downloadFile(context, e);
     if (v == 'edit')       _editTextFile(context, e);
-    if (v == 'open')       _openRemoteFile(context, e);
     if (v == 'extract')    _extractRemoteZip(context, e);
     if (v == 'copy')       _copy([e]);
     if (v == 'cut')        _cut([e]);
+    if (v == 'compress')   _compressRemoteFile(context, e);
+  }
+
+
+  Future<void> _compressRemoteFile(BuildContext context, FtpEntry e) async {
+    final base = p.basenameWithoutExtension(e.name);
+    final ctrl = showTransferProgressDialog(context, title: 'Préparation de $base.zip');
+    final tmpRoot = await getTemporaryDirectory();
+    final workDir = Directory(p.join(
+      tmpRoot.path, 'pulsefile_archive_remote',
+      DateTime.now().microsecondsSinceEpoch.toString(),
+    ));
+    final local = File(p.join(workDir.path, e.name));
+    final zip = File(p.join(workDir.path, '$base.zip'));
+    try {
+      await workDir.create(recursive: true);
+      await FtpService.download(widget.connection, e.path, localPath: local.path);
+      final encoder = ZipFileEncoder();
+      encoder.create(zip.path);
+      await encoder.addFile(local);
+      encoder.close();
+
+      UniversalClipboard.set([
+        ClipItem(kind: ClipKind.local, name: p.basename(zip.path),
+            isDir: false, path: zip.path),
+      ], cut: false);
+
+      if (!context.mounted) return;
+      final changed = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => TransferDestinationScreen(
+            title: 'Compresser vers…',
+            initialLocalPath: p.dirname(zip.path),
+          ),
+        ),
+      );
+      if (changed == true && mounted) {
+        showTopSnack(context, 'Archive créée : ${p.basename(zip.path)}',
+            backgroundColor: const Color(0xFF0F6E56));
+      }
+    } catch (err) {
+      if (context.mounted) await closeTransferProgressDialog(context, ctrl);
+      if (mounted) showTopSnack(context, 'Erreur de compression : $err',
+          backgroundColor: const Color(0xFFE24B4A));
+    } finally {
+      try { if (await workDir.exists()) await workDir.delete(recursive: true); } catch (_) {}
+    }
   }
 
   void _copy(List<FtpEntry> items) {
@@ -919,7 +974,7 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
       destFtpConn: widget.connection,
       onProgress: (frac, label) => ctrl.update(frac, label: label),
     );
-    if (context.mounted) closeTransferProgressDialog(context, ctrl);
+    if (context.mounted) await closeTransferProgressDialog(context, ctrl);
     final parts = <String>[];
     if (result.ok > 0) parts.add('${result.ok} collé(s)');
     if (result.errors > 0) parts.add('${result.errors} échec(s)');
@@ -989,11 +1044,11 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
           onProgress: (percent, recv, total) => ctrl.update(percent / 100,
               label: '${_fmtSize(recv)} / ${total > 0 ? _fmtSize(total) : '?'}'));
       if (!context.mounted) return;
-      closeTransferProgressDialog(context, ctrl);
+      await closeTransferProgressDialog(context, ctrl);
       await Navigator.push(context, MaterialPageRoute(
           builder: (_) => ImageViewerScreen(file: File(local))));
     } catch (err) {
-      if (context.mounted) closeTransferProgressDialog(context, ctrl);
+      if (context.mounted) await closeTransferProgressDialog(context, ctrl);
       if (mounted) showTopSnack(context, 'Erreur : $err',
           backgroundColor: const Color(0xFFE24B4A));
     }
@@ -1012,14 +1067,14 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
       await FtpService.download(widget.connection, e.path, localPath: local,
           onProgress: (percent, recv, total) => ctrl.update(percent / 100,
               label: '${_fmtSize(recv)} / ${total > 0 ? _fmtSize(total) : '?'}'));
-      if (context.mounted) closeTransferProgressDialog(context, ctrl);
+      if (context.mounted) await closeTransferProgressDialog(context, ctrl);
       final ok = await openFileExternally(local);
       if (!ok && mounted) {
         showTopSnack(context, 'Aucune application associée pour ouvrir ce fichier',
             backgroundColor: const Color(0xFFE24B4A));
       }
     } catch (err) {
-      if (context.mounted) closeTransferProgressDialog(context, ctrl);
+      if (context.mounted) await closeTransferProgressDialog(context, ctrl);
       if (mounted) showTopSnack(context, 'Erreur : $err',
           backgroundColor: const Color(0xFFE24B4A));
     }
@@ -1044,13 +1099,13 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
       await extractFileToDisk(zipPath, destDir);
 
       if (!context.mounted) return;
-      closeTransferProgressDialog(context, ctrl);
+      await closeTransferProgressDialog(context, ctrl);
       final opened = await openFolderExternally(destDir);
       showTopSnack(context,
           opened ? 'Extrait et ouvert' : 'Extrait dans : $destDir',
           backgroundColor: const Color(0xFF0F6E56));
     } catch (err) {
-      if (context.mounted) closeTransferProgressDialog(context, ctrl);
+      if (context.mounted) await closeTransferProgressDialog(context, ctrl);
       if (mounted) showTopSnack(context, 'Erreur : $err',
           backgroundColor: const Color(0xFFE24B4A));
     }
@@ -1067,7 +1122,7 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
         await FtpService.download(widget.connection, e.path, localPath: local,
             onProgress: (percent, recv, total) => ctrl.update(percent / 100,
                 label: '${_fmtSize(recv)} / ${total > 0 ? _fmtSize(total) : '?'}'));
-        if (context.mounted) closeTransferProgressDialog(context, ctrl);
+        if (context.mounted) await closeTransferProgressDialog(context, ctrl);
         if (mounted) showTopSnack(context, 'Enregistré : $local',
             backgroundColor: const Color(0xFF0F6E56));
       } else if (destination.kind == _FtpTransferDestinationKind.http) {
@@ -1082,7 +1137,7 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
             label: '${_fmtSize(done)} / ${total > 0 ? _fmtSize(total) : '?'}',
           ),
         );
-        if (context.mounted) closeTransferProgressDialog(context, ctrl);
+        if (context.mounted) await closeTransferProgressDialog(context, ctrl);
         if (mounted) showTopSnack(context, 'Copié vers HTTP : $remotePath',
             backgroundColor: const Color(0xFF0F6E56));
       } else {
@@ -1105,12 +1160,12 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
         } finally {
           try { if (await tmp.exists()) await tmp.delete(); } catch (_) {}
         }
-        if (context.mounted) closeTransferProgressDialog(context, ctrl);
+        if (context.mounted) await closeTransferProgressDialog(context, ctrl);
         if (mounted) showTopSnack(context, 'Copié vers FTP : $remotePath',
             backgroundColor: const Color(0xFF0F6E56));
       }
     } catch (err) {
-      if (context.mounted) closeTransferProgressDialog(context, ctrl);
+      if (context.mounted) await closeTransferProgressDialog(context, ctrl);
       if (mounted) showTopSnack(context, 'Erreur : $err',
           backgroundColor: const Color(0xFFE24B4A));
     }
@@ -1218,7 +1273,7 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
           onProgress: (percent, recv, total) => ctrl.update(percent / 100,
               label: '${_fmtSize(recv)} / ${total > 0 ? _fmtSize(total) : '?'}'));
     } catch (err) {
-      if (context.mounted) closeTransferProgressDialog(context, ctrl);
+      if (context.mounted) await closeTransferProgressDialog(context, ctrl);
       if (mounted) showTopSnack(context, 'Erreur : $err',
           backgroundColor: const Color(0xFFE24B4A));
       return;
@@ -1228,7 +1283,7 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
     try {
       content = await File(local).readAsString();
     } on FileSystemException {
-      closeTransferProgressDialog(context, ctrl);
+      await closeTransferProgressDialog(context, ctrl);
       if (mounted) {
         showTopSnack(context, 'Ce fichier n\'est pas un fichier texte lisible',
             backgroundColor: const Color(0xFFE24B4A));
@@ -1236,7 +1291,7 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
       }
       return;
     }
-    closeTransferProgressDialog(context, ctrl);
+    await closeTransferProgressDialog(context, ctrl);
     final edited = await Navigator.push<String>(context, MaterialPageRoute(
         builder: (_) => TextEditorScreen(filename: e.name, content: content)));
     if (edited == null || !context.mounted) return;
@@ -1246,11 +1301,11 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
       await FtpService.upload(widget.connection, local, e.path,
           onProgress: (percent, sent, total) => saveCtrl.update(percent / 100,
               label: '${_fmtSize(sent)} / ${total > 0 ? _fmtSize(total) : '?'}'));
-      if (context.mounted) closeTransferProgressDialog(context, saveCtrl);
+      if (context.mounted) await closeTransferProgressDialog(context, saveCtrl);
       if (mounted) showTopSnack(context, 'Fichier mis à jour',
           backgroundColor: const Color(0xFF0F6E56));
     } catch (err) {
-      if (context.mounted) closeTransferProgressDialog(context, saveCtrl);
+      if (context.mounted) await closeTransferProgressDialog(context, saveCtrl);
       if (mounted) showTopSnack(context, 'Erreur : $err',
           backgroundColor: const Color(0xFFE24B4A));
     }
@@ -1279,7 +1334,7 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
         errCount++;
       }
     }
-    if (context.mounted) closeTransferProgressDialog(context, ctrl);
+    if (context.mounted) await closeTransferProgressDialog(context, ctrl);
     if (mounted) {
       showTopSnack(context,
           errCount == 0
@@ -1318,7 +1373,7 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
         errCount++;
       }
     }
-    if (context.mounted) closeTransferProgressDialog(context, ctrl);
+    if (context.mounted) await closeTransferProgressDialog(context, ctrl);
     if (mounted) {
       final msg = StringBuffer('Téléchargé : $okCount fichier${okCount > 1 ? 's' : ''}');
       if (errCount  > 0) msg.write(', échec : $errCount');

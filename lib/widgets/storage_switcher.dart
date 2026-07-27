@@ -19,6 +19,38 @@ enum StorageKind { local, ftp, http }
 
 const _filesChannel = MethodChannel('com.pulsefile/files');
 
+
+Future<List<Directory>> _localRoots() async {
+  if (Platform.isWindows) {
+    try {
+      final result = await Process.run(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          'Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root',
+        ],
+      );
+      final paths = result.stdout
+          .toString()
+          .split(RegExp(r'\r?\n'))
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty && RegExp(r'^[A-Za-z]:\\?$').hasMatch(s))
+          .map((s) => s.endsWith(r'\') ? s : '$s\\')
+          .toSet();
+      return [
+        for (final path in paths)
+          if (Directory(path).existsSync()) Directory(path),
+      ];
+    } catch (_) {
+      return [Directory(r'C:\')];
+    }
+  }
+  if (Platform.isMacOS || Platform.isLinux) return [Directory('/')];
+  return [];
+}
+
 class StorageSwitcherButton extends StatelessWidget {
   final StorageKind current;
   final int? currentConnectionId; // null pour le local
@@ -34,7 +66,12 @@ class StorageSwitcherButton extends StatelessWidget {
   }
 
   Future<void> _open(BuildContext context) async {
-    final volumes  = Platform.isAndroid ? await resolveVolumes() : <QuickPath>[];
+    final volumes = Platform.isAndroid
+        ? await resolveVolumes()
+        : <QuickPath>[];
+    final localRoots = Platform.isWindows || Platform.isMacOS || Platform.isLinux
+        ? await _localRoots()
+        : <Directory>[];
     final ftpList  = await FtpService.listConnections();
     final httpList = await HttpService.listConnections();
     if (!context.mounted) return;
@@ -55,8 +92,25 @@ class StorageSwitcherButton extends StatelessWidget {
           shrinkWrap: true,
           padding: const EdgeInsets.symmetric(vertical: 8),
           children: [
-            if (volumes.isNotEmpty) ...[
+            if (localRoots.isNotEmpty || volumes.isNotEmpty) ...[
               _section('Local', subCol),
+              for (final root in localRoots)
+                ListTile(
+                  dense: true,
+                  leading: Icon(Icons.computer_outlined, color: accent, size: 20),
+                  title: Text(root.path.replaceAll(Platform.pathSeparator, ''),
+                      style: TextStyle(fontSize: 13, color: textCol)),
+                  trailing: current == StorageKind.local
+                      ? Icon(Icons.check, size: 18, color: accent) : null,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    Navigator.pushReplacement(context, MaterialPageRoute(
+                        builder: (_) => FileBrowserScreen(
+                            root: root,
+                            title: root.path.replaceAll(Platform.pathSeparator, ''),
+                            ch: _filesChannel)));
+                  },
+                ),
               for (final v in volumes)
                 ListTile(
                   dense: true,
@@ -107,7 +161,7 @@ class StorageSwitcherButton extends StatelessWidget {
                   },
                 ),
             ],
-            if (volumes.isEmpty && ftpList.isEmpty && httpList.isEmpty)
+            if (localRoots.isEmpty && volumes.isEmpty && ftpList.isEmpty && httpList.isEmpty)
               Padding(
                 padding: const EdgeInsets.all(24),
                 child: Text('Aucune autre source disponible',

@@ -155,7 +155,7 @@ class _TransferDestinationScreenState
       destHttpConn: destHttpConn,
       onProgress: (fraction, label) => ctrl.update(fraction, label: label),
     );
-    if (mounted) closeTransferProgressDialog(context, ctrl);
+    if (mounted) await closeTransferProgressDialog(context, ctrl);
 
     if (!mounted) return;
     final parts = <String>[];

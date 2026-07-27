@@ -72,6 +72,38 @@ Future<void> smartOpenLocalFile(BuildContext context, File file, MethodChannel c
 
 // ── Page d'accueil du gestionnaire ───────────────────────────
 
+
+Future<List<Directory>> _localRoots() async {
+  if (Platform.isWindows) {
+    try {
+      final result = await Process.run(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          'Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root',
+        ],
+      );
+      final paths = result.stdout
+          .toString()
+          .split(RegExp(r'\r?\n'))
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty && RegExp(r'^[A-Za-z]:\\?$').hasMatch(s))
+          .map((s) => s.endsWith(r'\') ? s : '$s\\')
+          .toSet();
+      return [
+        for (final path in paths)
+          if (Directory(path).existsSync()) Directory(path),
+      ];
+    } catch (_) {
+      return [Directory(r'C:\')];
+    }
+  }
+  if (Platform.isMacOS || Platform.isLinux) return [Directory('/')];
+  return [];
+}
+
 class FileManagerScreen extends StatefulWidget {
   const FileManagerScreen({super.key});
   @override
@@ -85,15 +117,16 @@ class _FileManagerScreenState extends State<FileManagerScreen>
   late final TabController _tab;
   List<_Volume> _volumes = [];
   bool _loading = true;
+  String? _selectedVolumePath;
 
   bool get _isDesktop => Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
   @override
   void initState() {
     super.initState();
-    // Desktop : uniquement FTP + HTTP (l'explorateur système est natif)
+    // Desktop : Disque local + FTP + HTTP
     // Android : Stockages + Récents + FTP + HTTP
-    _tab = TabController(length: _isDesktop ? 2 : 4, vsync: this);
+    _tab = TabController(length: _isDesktop ? 3 : 4, vsync: this);
     _init();
   }
 
@@ -106,22 +139,21 @@ class _FileManagerScreenState extends State<FileManagerScreen>
 
     final vols = <_Volume>[];
 
-    // Sous Windows/macOS/Linux, le stockage local est une connexion de
-    // premier niveau au même titre que FTP et HTTP.
+    // Desktop : chaque lecteur local est une racine distincte.
     if (_isDesktop) {
       try {
-        final systemDrive = Platform.environment['SystemDrive'];
-        final localRoot = Directory(
-          Platform.isWindows
-              ? '${systemDrive ?? 'C:'}${Platform.pathSeparator}'
-              : Platform.pathSeparator,
-        );
-        if (localRoot.existsSync()) {
-          vols.add(_Volume(
-            name: 'Disque local',
-            path: localRoot.path,
-            icon: Icons.computer_outlined,
-          ));
+        final roots = await _localRoots();
+        for (final root in roots) {
+          if (root.existsSync()) {
+            final label = Platform.isWindows
+                ? root.path.replaceAll(Platform.pathSeparator, '')
+                : root.path;
+            vols.add(_Volume(
+              name: label,
+              path: root.path,
+              icon: Icons.computer_outlined,
+            ));
+          }
         }
       } catch (_) {}
     } else {
@@ -159,7 +191,8 @@ class _FileManagerScreenState extends State<FileManagerScreen>
             if (parentName == 'storage' || parent.path == '/storage') break;
             root = parent;
           }
-          if (!vols.any((v) => v.path == root.path)) {
+          final normalized = p.normalize(root.path);
+          if (!vols.any((v) => p.normalize(v.path) == normalized)) {
             vols.add(_Volume(name: 'Carte SD / Externe', path: root.path,
                 icon: Icons.sd_card));
           }
@@ -300,6 +333,7 @@ class _VolumesTab extends StatefulWidget {
 
 class _VolumesTabState extends State<_VolumesTab> {
   List<FavoriteEntry> _favorites = [];
+  String? _selectedVolumePath;
 
   @override
   void initState() {
@@ -380,7 +414,11 @@ class _VolumesTabState extends State<_VolumesTab> {
             borderRadius: BorderRadius.circular(12),
             child: InkWell(
               borderRadius: BorderRadius.circular(12),
-              onTap: () async {
+              onTap: () {
+                setState(() => _selectedVolumePath =
+                    _selectedVolumePath == vol.path ? null : vol.path);
+              },
+              onDoubleTap: () async {
                 await Navigator.push(context, MaterialPageRoute(
                     builder: (_) => FileBrowserScreen(
                         root: Directory(vol.path),
@@ -392,7 +430,7 @@ class _VolumesTabState extends State<_VolumesTab> {
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: border)),
+                  border: Border.all(color: _selectedVolumePath == vol.path ? accent : border, width: _selectedVolumePath == vol.path ? 1.5 : 1)),
                 child: Row(children: [
                   Container(width: 42, height: 42,
                     decoration: BoxDecoration(
@@ -407,7 +445,10 @@ class _VolumesTabState extends State<_VolumesTab> {
                           fontSize: 14, fontWeight: FontWeight.w600, color: txtPri)),
                       Text(vol.path, style: TextStyle(fontSize: 11, color: txtSec),
                           overflow: TextOverflow.ellipsis),
-                    ])),
+                    ],
+                  )),
+                  if (_selectedVolumePath == vol.path)
+                    Icon(Icons.check_circle, color: accent, size: 20),
                   Icon(Icons.chevron_right, color: txtSec),
                 ]),
               ),
@@ -823,7 +864,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
       destPath: _current!.path,
       onProgress: (frac, label) => ctrl.update(frac, label: label),
     );
-    if (mounted) closeTransferProgressDialog(context, ctrl);
+    if (mounted) await closeTransferProgressDialog(context, ctrl);
     final parts = <String>[];
     if (result.ok > 0) parts.add('${result.ok} collé(s)');
     if (result.errors > 0) parts.add('${result.errors} échec(s)');
@@ -853,23 +894,49 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
         SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
   }
 
-  Future<void> _compress(List<FileSystemEntity> targets) async {
+  Future<void> _compressTo(List<FileSystemEntity> targets) async {
     if (targets.isEmpty || _current == null) return;
     final defaultName = targets.length == 1
         ? '${p.basenameWithoutExtension(targets.first.path)}.zip'
         : 'archive.zip';
     final ctrl = TextEditingController(text: defaultName);
-    final name = await showDialog<String>(context: context, builder: (_) =>
-        AlertDialog(title: const Text('Compresser'),
-          content: TextField(controller: ctrl, autofocus: true,
-              onSubmitted: (v) => Navigator.pop(context, v)),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
-            TextButton(onPressed: () => Navigator.pop(context, ctrl.text), child: const Text('Créer')),
-          ]));
-    if (name == null || name.trim().isEmpty) return;
-    final zipName = name.trim().toLowerCase().endsWith('.zip') ? name.trim() : '${name.trim()}.zip';
-    final zipPath = p.join(_current!.path, zipName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Compresser vers…'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Nom de l’archive'),
+          onSubmitted: (v) => Navigator.pop(context, v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Annuler'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, ctrl.text),
+            child: const Text('Suivant'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.trim().isEmpty || !mounted) return;
+
+    final zipName = name.trim().toLowerCase().endsWith('.zip')
+        ? name.trim()
+        : '${name.trim()}.zip';
+
+    final tmpDir = await getTemporaryDirectory();
+    final workDir = Directory(p.join(
+      tmpDir.path,
+      'pulsefile_archive',
+      DateTime.now().microsecondsSinceEpoch.toString(),
+    ));
+    await workDir.create(recursive: true);
+    final zipPath = p.join(workDir.path, zipName);
+
     try {
       final encoder = ZipFileEncoder();
       encoder.create(zipPath);
@@ -881,25 +948,83 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
         }
       }
       encoder.close();
-      setState(() => _selected.clear());
-      _snack('Archive créée : $zipName');
-      _load(_current!);
+
+      UniversalClipboard.set([
+        ClipItem(
+          kind: ClipKind.local,
+          name: zipName,
+          isDir: false,
+          path: zipPath,
+        ),
+      ], cut: false);
+
+      if (!mounted) return;
+      final changed = await Navigator.of(context).push<bool>(
+        MaterialPageRoute<bool>(
+          fullscreenDialog: true,
+          builder: (destinationContext) => TransferDestinationScreen(
+            title: 'Compresser vers…',
+            initialLocalPath: _current!.path,
+          ),
+        ),
+      );
+
+      if (changed == true && mounted) {
+        _selected.clear();
+        _load(_current!);
+      }
     } catch (e) {
-      _snack('Erreur : $e');
+      _snack('Erreur de compression : $e');
+    } finally {
+      try {
+        if (await workDir.exists()) await workDir.delete(recursive: true);
+      } catch (_) {}
     }
   }
 
-  Future<void> _extract(File zipFile) async {
-    if (_current == null) return;
-    final destName = p.basenameWithoutExtension(zipFile.path);
-    final destDir = p.join(_current!.path, destName);
+  Future<void> _extractTo(File zipFile) async {
+    final tmpDir = await getTemporaryDirectory();
+    final workDir = Directory(p.join(
+      tmpDir.path,
+      'pulsefile_extract',
+      DateTime.now().microsecondsSinceEpoch.toString(),
+    ));
+    final destDir = Directory(p.join(workDir.path,
+        p.basenameWithoutExtension(zipFile.path)));
+
     try {
-      await Directory(destDir).create(recursive: true);
-      await extractFileToDisk(zipFile.path, destDir);
-      _snack('Extrait dans $destName/');
-      _load(_current!);
+      await destDir.create(recursive: true);
+      await extractFileToDisk(zipFile.path, destDir.path);
+
+      UniversalClipboard.set([
+        ClipItem(
+          kind: ClipKind.local,
+          name: p.basename(destDir.path),
+          isDir: true,
+          path: destDir.path,
+        ),
+      ], cut: false);
+
+      if (!mounted) return;
+      final changed = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => TransferDestinationScreen(
+            title: 'Décompresser vers…',
+            initialLocalPath: _current?.path ?? p.dirname(zipFile.path),
+          ),
+        ),
+      );
+
+      if (changed == true && mounted && _current != null) {
+        _load(_current!);
+      }
     } catch (e) {
-      _snack('Erreur : $e');
+      _snack('Erreur de décompression : $e');
+    } finally {
+      try {
+        if (await workDir.exists()) await workDir.delete(recursive: true);
+      } catch (_) {}
     }
   }
 
@@ -982,10 +1107,48 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
             IconButton(icon: const Icon(Icons.cut_outlined),
                 onPressed: () => _cut(_selected.map(
                     (s) => _entries.firstWhere((e) => e.path == s)).toList())),
-            IconButton(icon: const Icon(Icons.folder_zip_outlined),
-                tooltip: 'Compresser la sélection',
-                onPressed: () => _compress(_selected.map(
-                    (s) => _entries.firstWhere((e) => e.path == s)).toList())),
+            PopupMenuButton<String>(
+              tooltip: 'Actions sur la sélection',
+              icon: const Icon(Icons.more_vert),
+              onSelected: (action) {
+                final items = _selected.map(
+                    (s) => _entries.firstWhere((e) => e.path == s)).toList();
+                switch (action) {
+                  case 'compress':
+                    _compressTo(items);
+                  case 'extract':
+                    if (items.length == 1 && items.first is File &&
+                        p.extension(items.first.path).toLowerCase() == '.zip') {
+                      _extractTo(items.first as File);
+                    }
+                }
+              },
+              itemBuilder: (_) {
+                final items = _selected.map(
+                    (s) => _entries.firstWhere((e) => e.path == s)).toList();
+                final hasZip = items.length == 1 && items.first is File &&
+                    p.extension(items.first.path).toLowerCase() == '.zip';
+                return [
+                  const PopupMenuItem(
+                    value: 'compress',
+                    child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.folder_zip_outlined),
+                      title: Text('Compresser vers…'),
+                    ),
+                  ),
+                  if (hasZip)
+                    const PopupMenuItem(
+                      value: 'extract',
+                      child: ListTile(
+                        dense: true,
+                        leading: Icon(Icons.unarchive_outlined),
+                        title: Text('Décompresser vers…'),
+                      ),
+                    ),
+                ];
+              },
+            ),
             IconButton(icon: const Icon(Icons.delete_outline),
                 onPressed: () => _delete(_selected.map(
                     (s) => _entries.firstWhere((e) => e.path == s)).toList())),
@@ -1052,15 +1215,22 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
   bool _isImage(FileSystemEntity e) =>
       e is File && _kImageExts.contains(p.extension(e.path).toLowerCase());
 
-  void _onTap(FileSystemEntity entity, bool isSel, bool selecting) {
-    if (selecting) {
-      setState(() { if (isSel) _selected.remove(entity.path);
-        else _selected.add(entity.path); });
-    } else if (entity is Directory) {
+  void _toggleLocalSelection(FileSystemEntity entity) {
+    setState(() {
+      if (_selected.contains(entity.path)) {
+        _selected.remove(entity.path);
+      } else {
+        _selected.add(entity.path);
+      }
+    });
+  }
+
+  void _openLocalEntity(FileSystemEntity entity) {
+    if (entity is Directory) {
       _lastOpenedSubDir = entity;
       _load(entity);
-    } else {
-      _openFile(entity as File);
+    } else if (entity is File) {
+      _openFile(entity);
     }
   }
 
@@ -1075,9 +1245,9 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
       case 'move_to': _moveTo([entity]);
       case 'copy':   _copy([entity]);
       case 'cut':    _cut([entity]);
-      case 'compress': _compress([entity]);
+      case 'compress': _compressTo([entity]);
       case 'extract':
-        if (entity is File) _extract(entity);
+        if (entity is File) _extractTo(entity);
       case 'properties': _showProperties(entity);
       case 'delete': _delete([entity]);
       case 'share':
@@ -1104,8 +1274,8 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
       _mi('move_to', Icons.drive_file_move_outlined, 'Déplacer vers…'),
       _mi('copy',   Icons.copy_outlined,  'Copier'),
       _mi('cut',    Icons.cut_outlined,   'Couper'),
-      _mi('compress', Icons.folder_zip_outlined, 'Compresser'),
-      if (isZip) _mi('extract', Icons.unarchive_outlined, 'Extraire'),
+      _mi('compress', Icons.folder_zip_outlined, 'Compresser vers…'),
+      if (isZip) _mi('extract', Icons.unarchive_outlined, 'Décompresser vers…'),
       if (entity is File)
         _mi('share', Icons.share_outlined, 'Partager'),
       _mi('properties', Icons.info_outline, 'Propriétés'),
@@ -1153,7 +1323,8 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
       borderRadius: BorderRadius.circular(10),
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
-        onTap: () => _onTap(entity, isSel, selecting),
+        onTap: () => _toggleLocalSelection(entity),
+        onDoubleTap: () => _openLocalEntity(entity),
         onLongPress: () => _onLongPress(entity, isSel),
         onSecondaryTapDown: (details) =>
             _showContextMenu(context, details.globalPosition, entity),
@@ -1198,7 +1369,8 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     final isImg = _isImage(entity);
 
     return GestureDetector(
-      onTap: () => _onTap(entity, isSel, selecting),
+      onTap: () => _toggleLocalSelection(entity),
+      onDoubleTap: () => _openLocalEntity(entity),
       onLongPress: () => _onLongPress(entity, isSel),
       onSecondaryTapDown: (details) =>
           _showContextMenu(context, details.globalPosition, entity),

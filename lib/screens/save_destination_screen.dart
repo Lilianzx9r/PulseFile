@@ -93,7 +93,7 @@ class _SaveDestinationScreenState extends State<SaveDestinationScreen> {
         errCount++;
       }
     }
-    if (mounted) closeTransferProgressDialog(context, ctrl);
+    if (mounted) await closeTransferProgressDialog(context, ctrl);
     if (errCount == 0) {
       await returnSaveResult(ok: true, savedPath: lastPath);
     } else if (mounted) {
@@ -137,7 +137,7 @@ class _SaveDestinationScreenState extends State<SaveDestinationScreen> {
         errCount++;
       }
     }
-    if (mounted) closeTransferProgressDialog(context, ctrl);
+    if (mounted) await closeTransferProgressDialog(context, ctrl);
     if (errCount == 0) {
       await returnSaveResult(ok: true, savedPath: lastPath);
     } else if (mounted) {
@@ -182,7 +182,7 @@ class _SaveDestinationScreenState extends State<SaveDestinationScreen> {
         errCount++;
       }
     }
-    if (mounted) closeTransferProgressDialog(context, ctrl);
+    if (mounted) await closeTransferProgressDialog(context, ctrl);
     if (errCount == 0) {
       await returnSaveResult(ok: true, savedPath: lastPath);
     } else if (mounted) {
