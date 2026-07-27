@@ -383,6 +383,108 @@ class HttpService {
     }
   }
 
+
+  /// Retourne les capacités annoncées par le serveur PHP.
+  static Future<Map<String, dynamic>> capabilities(HttpConnection conn) async {
+    final uri = _sign(Uri.parse('${conn.url}?action=capabilities'), conn);
+    final res = await http.get(uri, headers: _headers(conn)).timeout(_timeout);
+    if (res.statusCode != 200) {
+      throw Exception(_extractError(res.body) ??
+          'HTTP ${res.statusCode} — ${_shortBody(res.body)}');
+    }
+    final decoded = jsonDecode(res.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw Exception('Réponse capabilities invalide');
+    }
+    return decoded;
+  }
+
+  /// Obtient les métadonnées d'un fichier ou dossier.
+  static Future<HttpRemoteEntry> stat(HttpConnection conn, String remotePath) async {
+    final uri = _sign(Uri.parse('${conn.url}?action=vfs_stat'
+        '&path=${Uri.encodeQueryComponent(remotePath)}'), conn);
+    final res = await http.get(uri, headers: _headers(conn)).timeout(_timeout);
+    if (res.statusCode != 200) {
+      throw Exception(_extractError(res.body) ??
+          'HTTP ${res.statusCode} — ${_shortBody(res.body)}');
+    }
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    return HttpRemoteEntry(
+      name: body['name']?.toString() ?? p.basename(remotePath),
+      remotePath: body['path']?.toString() ?? remotePath,
+      isDir: body['isDirectory'] == true || body['isDir'] == true,
+      size: (body['size'] as num?)?.toInt() ?? 0,
+      modified: body['modifiedAt'] == null
+          ? null
+          : DateTime.tryParse(body['modifiedAt'].toString()),
+    );
+  }
+
+  /// Copie un fichier ou dossier sur le serveur HTTP.
+  static Future<void> copy(HttpConnection conn, String from, String to) async {
+    final uri = _sign(Uri.parse('${conn.url}?action=vfs_copy'
+        '&from=${Uri.encodeQueryComponent(from)}'
+        '&to=${Uri.encodeQueryComponent(to)}'), conn);
+    final res = await http.post(uri, headers: _headers(conn)).timeout(_timeout);
+    if (res.statusCode != 200) {
+      throw Exception(_extractError(res.body) ??
+          'HTTP ${res.statusCode} — ${_shortBody(res.body)}');
+    }
+  }
+
+  /// Supprime un dossier distant, éventuellement récursivement.
+  static Future<void> removeDirectory(HttpConnection conn, String path,
+      {bool recursive = false}) async {
+    final uri = _sign(Uri.parse('${conn.url}?action=vfs_rmdir'
+        '&path=${Uri.encodeQueryComponent(path)}'
+        '&recursive=${recursive ? '1' : '0'}'), conn);
+    final res = await http.delete(uri, headers: _headers(conn)).timeout(_timeout);
+    if (res.statusCode != 200) {
+      throw Exception(_extractError(res.body) ??
+          'HTTP ${res.statusCode} — ${_shortBody(res.body)}');
+    }
+  }
+
+  /// Recherche récursive dans un dossier distant.
+  static Future<List<HttpRemoteEntry>> search(
+      HttpConnection conn, String path, String query) async {
+    final uri = _sign(Uri.parse('${conn.url}?action=vfs_search'
+        '&path=${Uri.encodeQueryComponent(path)}'
+        '&query=${Uri.encodeQueryComponent(query)}'), conn);
+    final res = await http.get(uri, headers: _headers(conn)).timeout(_timeout);
+    if (res.statusCode != 200) {
+      throw Exception(_extractError(res.body) ??
+          'HTTP ${res.statusCode} — ${_shortBody(res.body)}');
+    }
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    final raw = (body['entries'] as List?) ?? const [];
+    return raw.map((item) {
+      final e = item as Map<String, dynamic>;
+      return HttpRemoteEntry(
+        name: e['name']?.toString() ?? '',
+        remotePath: e['path']?.toString() ?? '',
+        isDir: e['isDirectory'] == true || e['isDir'] == true,
+        size: (e['size'] as num?)?.toInt() ?? 0,
+        modified: e['modifiedAt'] == null
+            ? null
+            : DateTime.tryParse(e['modifiedAt'].toString()),
+      );
+    }).toList(growable: false);
+  }
+
+  /// Calcule le SHA-256 d'un fichier distant.
+  static Future<String> checksum(HttpConnection conn, String path) async {
+    final uri = _sign(Uri.parse('${conn.url}?action=vfs_checksum'
+        '&path=${Uri.encodeQueryComponent(path)}'), conn);
+    final res = await http.get(uri, headers: _headers(conn)).timeout(_timeout);
+    if (res.statusCode != 200) {
+      throw Exception(_extractError(res.body) ??
+          'HTTP ${res.statusCode} — ${_shortBody(res.body)}');
+    }
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    return body['checksum']?.toString() ?? '';
+  }
+
   /// Extrait le champ "error" d'une réponse JSON si possible, sinon null
   /// (ne lève jamais d'exception même si la réponse n'est pas du JSON valide).
   static String? _extractError(String body) {

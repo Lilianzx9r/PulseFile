@@ -7,6 +7,10 @@ environment:
   sdk: '>=3.0.0 <4.0.0'
 
 dependencies:
+  # Bibliothèque commune Pulse : le dossier ../PulseCore doit être présent
+  # à côté de ce projet pendant le développement.
+  pulse_core:
+    path: ../PulseCore
   flutter:
     sdk: flutter
   # CLI (scripting cmd/PowerShell sous Windows)
@@ -27,6 +31,7 @@ dependencies:
   # UI
   gap: ^3.0.1
   file_picker: ^8.0.0
+  cross_file: ^0.3.4+2
   # Archives (compresser/extraire)
   archive: ^3.6.1
   # Glisser-déposer (Windows/macOS/Linux)

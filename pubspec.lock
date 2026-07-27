@@ -66,7 +66,7 @@ packages:
     source: hosted
     version: "1.19.1"
   cross_file:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: cross_file
       sha256: "92c9c43c383bfa1c32079d3bc492d55d6d4318044b7b47edaff8971cbb555c51"
@@ -456,6 +456,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.2.0"
+  pulse_core:
+    dependency: "direct main"
+    description:
+      path: "../PulseCore"
+      relative: true
+    source: path
+    version: "0.3.0"
   record_use:
     dependency: transitive
     description:

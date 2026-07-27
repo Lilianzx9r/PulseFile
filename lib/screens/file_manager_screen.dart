@@ -15,6 +15,7 @@ import 'ftp_screen.dart';
 import 'http_screen.dart';
 import 'http_explorer_screen.dart';
 import 'settings_screen.dart';
+import 'transfer_destination_screen.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
@@ -105,24 +106,44 @@ class _FileManagerScreenState extends State<FileManagerScreen>
 
     final vols = <_Volume>[];
 
-    // Stockage interne principal
-    try {
-      final ext = await getExternalStorageDirectory();
-      if (ext != null) {
-        Directory root = ext;
-        // Remonter jusqu'à /storage/emulated/0
-        for (var i = 0; i < 6; i++) {
-          final parent = root.parent;
-          if (parent.path == root.path) break;
-          root = parent;
-          if (root.path.endsWith('/0') ||
-              root.path.endsWith('/emulated/0') ||
-              root.path == '/storage/emulated/0') break;
+    // Sous Windows/macOS/Linux, le stockage local est une connexion de
+    // premier niveau au même titre que FTP et HTTP.
+    if (_isDesktop) {
+      try {
+        final systemDrive = Platform.environment['SystemDrive'];
+        final localRoot = Directory(
+          Platform.isWindows
+              ? '${systemDrive ?? 'C:'}${Platform.pathSeparator}'
+              : Platform.pathSeparator,
+        );
+        if (localRoot.existsSync()) {
+          vols.add(_Volume(
+            name: 'Disque local',
+            path: localRoot.path,
+            icon: Icons.computer_outlined,
+          ));
         }
-        vols.add(_Volume(name: 'Stockage interne', path: root.path,
-            icon: Icons.smartphone));
-      }
-    } catch (_) {}
+      } catch (_) {}
+    } else {
+      // Stockage interne principal
+      try {
+        final ext = await getExternalStorageDirectory();
+        if (ext != null) {
+          Directory root = ext;
+          // Remonter jusqu'à /storage/emulated/0
+          for (var i = 0; i < 6; i++) {
+            final parent = root.parent;
+            if (parent.path == root.path) break;
+            root = parent;
+            if (root.path.endsWith('/0') ||
+                root.path.endsWith('/emulated/0') ||
+                root.path == '/storage/emulated/0') break;
+          }
+          vols.add(_Volume(name: 'Stockage interne', path: root.path,
+              icon: Icons.smartphone));
+        }
+      } catch (_) {}
+    }
 
     // Stockages externes (SD cards etc.) via getExternalStorageDirectories
     try {
@@ -230,6 +251,8 @@ class _FileManagerScreenState extends State<FileManagerScreen>
           labelColor: accent,
           unselectedLabelColor: const Color(0xFF888780),
           tabs: [
+            if (_isDesktop)
+              const Tab(icon: Icon(Icons.computer_outlined), text: 'Local'),
             if (!_isDesktop) ...[
               const Tab(icon: Icon(Icons.folder_outlined),  text: 'Stockages'),
               const Tab(icon: Icon(Icons.history),           text: 'Récents'),
@@ -242,6 +265,8 @@ class _FileManagerScreenState extends State<FileManagerScreen>
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : TabBarView(controller: _tab, children: [
+              if (_isDesktop)
+                _VolumesTab(volumes: _volumes, isDark: isDark, ch: _ch),
               if (!_isDesktop) ...[
                 _VolumesTab(volumes: _volumes, isDark: isDark, ch: _ch),
                 _RecentFilesTab(volumes: _volumes, isDark: isDark, ch: _ch),
@@ -736,6 +761,44 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     ));
   }
 
+  Future<void> _copyTo(List<FileSystemEntity> targets) async {
+    UniversalClipboard.set(targets.map((e) => ClipItem(
+        kind: ClipKind.local,
+        name: p.basename(e.path),
+        isDir: e is Directory,
+        path: e.path)).toList(), cut: false);
+    if (!mounted) return;
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TransferDestinationScreen(
+          title: 'Copier vers…',
+          initialLocalPath: _current?.path ?? widget.root.path,
+        ),
+      ),
+    );
+    if (changed == true && _current != null) _load(_current!);
+  }
+
+  Future<void> _moveTo(List<FileSystemEntity> targets) async {
+    UniversalClipboard.set(targets.map((e) => ClipItem(
+        kind: ClipKind.local,
+        name: p.basename(e.path),
+        isDir: e is Directory,
+        path: e.path)).toList(), cut: true);
+    if (!mounted) return;
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TransferDestinationScreen(
+          title: 'Déplacer vers…',
+          initialLocalPath: _current?.path ?? widget.root.path,
+        ),
+      ),
+    );
+    if (changed == true && _current != null) _load(_current!);
+  }
+
   void _copy(List<FileSystemEntity> t) {
     UniversalClipboard.set(t.map((e) => ClipItem(
         kind: ClipKind.local, name: p.basename(e.path),
@@ -1008,6 +1071,8 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
   void _onMenuAction(FileSystemEntity entity, String v) {
     switch (v) {
       case 'rename': _rename(entity);
+      case 'copy_to': _copyTo([entity]);
+      case 'move_to': _moveTo([entity]);
       case 'copy':   _copy([entity]);
       case 'cut':    _cut([entity]);
       case 'compress': _compress([entity]);
@@ -1035,6 +1100,8 @@ class _FileBrowserScreenState extends State<FileBrowserScreen> {
     final isZip = entity is File && p.extension(entity.path).toLowerCase() == '.zip';
     return [
       _mi('rename', Icons.edit_outlined,  'Renommer'),
+      _mi('copy_to', Icons.copy_outlined,  'Copier vers…'),
+      _mi('move_to', Icons.drive_file_move_outlined, 'Déplacer vers…'),
       _mi('copy',   Icons.copy_outlined,  'Copier'),
       _mi('cut',    Icons.cut_outlined,   'Couper'),
       _mi('compress', Icons.folder_zip_outlined, 'Compresser'),

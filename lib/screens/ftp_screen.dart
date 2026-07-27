@@ -13,6 +13,8 @@ import 'package:gap/gap.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../services/ftp_service.dart';
+import '../services/http_service.dart';
+import '../services/cross_connection_transfer_service.dart';
 import '../services/last_access_service.dart';
 import '../services/favorites_service.dart';
 import '../services/settings_service.dart';
@@ -33,6 +35,25 @@ import '../widgets/storage_switcher.dart';
 import '../widgets/swipe_recents_appbar.dart';
 import '../services/recent_folders_service.dart';
 import 'package:archive/archive_io.dart';
+
+
+enum _FtpTransferDestinationKind { local, ftp, http }
+
+class _FtpTransferDestination {
+  final _FtpTransferDestinationKind kind;
+  final String path;
+  final FtpConnection? ftp;
+  final HttpConnection? http;
+
+  const _FtpTransferDestination._(this.kind, this.path, this.ftp, this.http);
+
+  factory _FtpTransferDestination.local(String path) =>
+      _FtpTransferDestination._(_FtpTransferDestinationKind.local, path, null, null);
+  factory _FtpTransferDestination.ftp(FtpConnection conn, String path) =>
+      _FtpTransferDestination._(_FtpTransferDestinationKind.ftp, path, conn, null);
+  factory _FtpTransferDestination.http(HttpConnection conn, String path) =>
+      _FtpTransferDestination._(_FtpTransferDestinationKind.http, path, null, conn);
+}
 
 // ── Écran principal : liste des connexions ─────────────────────────────────────
 
@@ -1036,27 +1057,157 @@ class _FtpExplorerScreenState extends State<FtpExplorerScreen> {
   }
 
   Future<void> _downloadFile(BuildContext context, FtpEntry e) async {
-    final defaultPath = widget.connection.defaultDownloadPath;
-    final dirPath = (defaultPath != null && defaultPath.isNotEmpty)
-        ? defaultPath
-        : await Navigator.push<String>(context, MaterialPageRoute(
-            builder: (_) => const LocalFolderPickerScreen()));
-    if (dirPath == null || !context.mounted) return;
+    final destination = await _chooseTransferDestination(context);
+    if (destination == null || !context.mounted) return;
 
-    final local = p.join(dirPath, e.name);
-    final ctrl = showTransferProgressDialog(context, title: 'Téléchargement de ${e.name}');
+    final ctrl = showTransferProgressDialog(context, title: 'Transfert de ${e.name}');
     try {
-      await FtpService.download(widget.connection, e.path, localPath: local,
-          onProgress: (percent, recv, total) => ctrl.update(percent / 100,
-              label: '${_fmtSize(recv)} / ${total > 0 ? _fmtSize(total) : '?'}'));
-      if (context.mounted) closeTransferProgressDialog(context, ctrl);
-      if (mounted) showTopSnack(context, 'Enregistré : $local',
-          backgroundColor: const Color(0xFF0F6E56));
+      if (destination.kind == _FtpTransferDestinationKind.local) {
+        final local = p.join(destination.path, e.name);
+        await FtpService.download(widget.connection, e.path, localPath: local,
+            onProgress: (percent, recv, total) => ctrl.update(percent / 100,
+                label: '${_fmtSize(recv)} / ${total > 0 ? _fmtSize(total) : '?'}'));
+        if (context.mounted) closeTransferProgressDialog(context, ctrl);
+        if (mounted) showTopSnack(context, 'Enregistré : $local',
+            backgroundColor: const Color(0xFF0F6E56));
+      } else if (destination.kind == _FtpTransferDestinationKind.http) {
+        final remotePath = _joinRemotePath(destination.path, e.name);
+        await CrossConnectionTransferService.ftpToHttp(
+          source: widget.connection,
+          sourcePath: e.path,
+          destination: destination.http!,
+          destinationPath: remotePath,
+          onProgress: (done, total) => ctrl.update(
+            total > 0 ? done / total : null,
+            label: '${_fmtSize(done)} / ${total > 0 ? _fmtSize(total) : '?'}',
+          ),
+        );
+        if (context.mounted) closeTransferProgressDialog(context, ctrl);
+        if (mounted) showTopSnack(context, 'Copié vers HTTP : $remotePath',
+            backgroundColor: const Color(0xFF0F6E56));
+      } else {
+        final remotePath = _joinRemotePath(destination.path, e.name);
+        final tmpDir = await getTemporaryDirectory();
+        final tmp = File(p.join(tmpDir.path, 'pulsefile_transfer',
+            'pulse_${DateTime.now().microsecondsSinceEpoch}_${p.basename(e.name)}'));
+        await tmp.parent.create(recursive: true);
+        try {
+          await FtpService.download(widget.connection, e.path, localPath: tmp.path,
+              onProgress: (percent, recv, total) => ctrl.update(
+                total > 0 ? (recv / total) * 0.5 : null,
+                label: 'Téléchargement ${_fmtSize(recv)}',
+              ));
+          await FtpService.upload(destination.ftp!, tmp.path, remotePath,
+              onProgress: (percent, sent, total) => ctrl.update(
+                total > 0 ? 0.5 + (sent / total) * 0.5 : null,
+                label: 'Envoi ${_fmtSize(sent)}',
+              ));
+        } finally {
+          try { if (await tmp.exists()) await tmp.delete(); } catch (_) {}
+        }
+        if (context.mounted) closeTransferProgressDialog(context, ctrl);
+        if (mounted) showTopSnack(context, 'Copié vers FTP : $remotePath',
+            backgroundColor: const Color(0xFF0F6E56));
+      }
     } catch (err) {
       if (context.mounted) closeTransferProgressDialog(context, ctrl);
       if (mounted) showTopSnack(context, 'Erreur : $err',
           backgroundColor: const Color(0xFFE24B4A));
     }
+  }
+
+  String _joinRemotePath(String dir, String name) {
+    if (dir == '.' || dir.isEmpty) return name;
+    return '${dir.replaceAll(RegExp(r'/+$'), '')}/$name';
+  }
+
+  Future<_FtpTransferDestination?> _chooseTransferDestination(BuildContext context) async {
+    final ftpList = await FtpService.listConnections();
+    final httpList = await HttpService.listConnections();
+    if (!context.mounted) return null;
+
+    return showModalBottomSheet<_FtpTransferDestination>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheet) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('Télécharger vers…'),
+              subtitle: Text('Choisissez n’importe quelle connexion'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.phone_android),
+              title: const Text('Disque local'),
+              onTap: () async {
+                final path = await Navigator.push<String>(sheet,
+                    MaterialPageRoute(builder: (_) => const LocalFolderPickerScreen()));
+                if (path != null && sheet.mounted) {
+                  Navigator.pop(sheet, _FtpTransferDestination.local(path));
+                }
+              },
+            ),
+            for (final conn in ftpList)
+              ListTile(
+                leading: const Icon(Icons.cloud_outlined),
+                title: Text(conn.name),
+                subtitle: const Text('FTP'),
+                onTap: () async {
+                  final path = await Navigator.push<String>(sheet,
+                    MaterialPageRoute(builder: (_) => RemoteFolderPickerScreen(
+                      title: 'Destination FTP',
+                      initialPath: conn.initialPath,
+                      listFolder: (path) async {
+                        final entries = await FtpService.list(conn, path);
+                        return entries.where((e) => e.isDir)
+                            .map((e) => RemoteFolderEntry(name: e.name, path: e.path)).toList();
+                      },
+                      parentOf: (path) {
+                        final parts = path.split('/').where((s) => s.isNotEmpty).toList();
+                        if (parts.isEmpty) return '/';
+                        parts.removeLast();
+                        return parts.isEmpty ? '/' : '/${parts.join('/')}';
+                      },
+                      canGoUp: (path) => path != '/' && path.isNotEmpty,
+                    )));
+                  if (path != null && sheet.mounted) {
+                    Navigator.pop(sheet, _FtpTransferDestination.ftp(conn, path));
+                  }
+                },
+              ),
+            for (final conn in httpList)
+              ListTile(
+                leading: const Icon(Icons.http_outlined),
+                title: Text(conn.name),
+                subtitle: const Text('HTTP'),
+                onTap: () async {
+                  final path = await Navigator.push<String>(sheet,
+                    MaterialPageRoute(builder: (_) => RemoteFolderPickerScreen(
+                      title: 'Destination HTTP',
+                      initialPath: '.',
+                      listFolder: (path) async {
+                        final entries = await HttpService.list(conn, subdir: path);
+                        return entries.where((e) => e.isDir)
+                            .map((e) => RemoteFolderEntry(name: e.name, path: e.remotePath)).toList();
+                      },
+                      parentOf: (path) {
+                        final parts = path.split('/').where((s) => s.isNotEmpty && s != '.').toList();
+                        if (parts.isEmpty) return '.';
+                        parts.removeLast();
+                        return parts.isEmpty ? '.' : parts.join('/');
+                      },
+                      canGoUp: (path) => path != '.' && path.isNotEmpty,
+                    )));
+                  if (path != null && sheet.mounted) {
+                    Navigator.pop(sheet, _FtpTransferDestination.http(conn, path));
+                  }
+                },
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _editTextFile(BuildContext context, FtpEntry e) async {
